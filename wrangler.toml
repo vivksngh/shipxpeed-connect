@@ -9,7 +9,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "shipxpeed_connect"
-database_id = "REPLACE_WITH_YOUR_D1_ID"
+database_id = "49afd48e-3053-4383-9965-e93bdb7d33bc"
 
 # --- Public variables (safe to commit) ---
 # APP_URL must be the exact public URL of this Worker once deployed,
