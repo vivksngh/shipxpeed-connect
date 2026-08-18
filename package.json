@@ -1,0 +1,18 @@
+{
+  "name": "shipxpeed-connect",
+  "version": "0.1.0",
+  "description": "Shopify to Shipxpeed order integration (Cloudflare Workers + D1)",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 execute shipxpeed_connect --local --file=./schema.sql",
+    "db:remote": "wrangler d1 execute shipxpeed_connect --remote --file=./schema.sql",
+    "seed:remote": "wrangler d1 execute shipxpeed_connect --remote --command"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0",
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,26 @@
+name = "shipxpeed-connect"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# --- D1 database binding ---
+# After you run `wrangler d1 create shipxpeed_connect`, paste the returned
+# database_id below (replace REPLACE_WITH_YOUR_D1_ID).
+[[d1_databases]]
+binding = "DB"
+database_name = "shipxpeed_connect"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# --- Public variables (safe to commit) ---
+# APP_URL must be the exact public URL of this Worker once deployed,
+# e.g. https://shipxpeed-connect.<your-subdomain>.workers.dev
+# (set the real value after first deploy, then redeploy).
+[vars]
+APP_URL = "https://shipxpeed-connect.example.workers.dev"
+SHOPIFY_API_VERSION = "2025-07"
+SHOPIFY_SCOPES = "read_orders,write_orders,read_products,read_customers,read_fulfillments,write_fulfillments,read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders"
+
+# --- Secrets (DO NOT put here; set via `wrangler secret put`) ---
+#   wrangler secret put SHOPIFY_API_KEY
+#   wrangler secret put SHOPIFY_API_SECRET
+#   wrangler secret put SESSION_SECRET
