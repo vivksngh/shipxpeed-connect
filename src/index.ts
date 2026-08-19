@@ -13,6 +13,7 @@ import {
   buildAuthorizeUrl,
   exchangeToken,
   fetchAllOrders,
+  fetchShopInfo,
   findOrderIdByName,
   fulfillWithTracking,
 } from "./shopify";
@@ -117,6 +118,8 @@ export default {
       }
       if (path === "/connect" && method === "GET") return htmlResponse(connectPage(client.name ?? client.email));
       if (path === "/connect" && method === "POST") return handleConnect(req, env, client);
+      if (path === "/connect/token" && method === "GET") return htmlResponse(connectPage(client.name ?? client.email));
+      if (path === "/connect/token" && method === "POST") return handleConnectToken(req, env, client);
 
       const m = path.match(/^\/store\/(\d+)\/(orders|reconnect|process|import|delete|junk)$/);
       if (m) {
@@ -188,6 +191,37 @@ async function handleConnect(req: Request, env: Env, client: Client): Promise<Re
   const shop = normalizeShopDomain(String(form.get("shop") ?? ""));
   if (!shop) return htmlResponse(connectPage(client.name ?? client.email, "Please enter a valid .myshopify.com domain."), 400);
   return startOAuth(env, client, shop);
+}
+
+// Connect a store directly with an Admin API access token (no OAuth / no app review).
+async function handleConnectToken(req: Request, env: Env, client: Client): Promise<Response> {
+  const name = client.name ?? client.email;
+  const form = await req.formData();
+  const shop = normalizeShopDomain(String(form.get("shop") ?? ""));
+  const token = String(form.get("token") ?? "").trim();
+  if (!shop) return htmlResponse(connectPage(name, "Please enter a valid .myshopify.com domain."), 400);
+  if (!token) return htmlResponse(connectPage(name, "Please paste the Admin API access token (starts with shpat_)."), 400);
+
+  // Validate the token by calling the Shop endpoint.
+  const info = await fetchShopInfo(shop, token, env.SHOPIFY_API_VERSION);
+  if (!info) {
+    return htmlResponse(
+      connectPage(name, "Couldn't connect with that token. Check the store domain and token, and that the custom app is installed with order + fulfillment scopes."),
+      400
+    );
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO stores (client_id, shop_domain, access_token, status, oauth_state, installed_at)
+     VALUES (?, ?, ?, 'connected', NULL, datetime('now'))
+     ON CONFLICT(client_id, shop_domain)
+     DO UPDATE SET access_token = excluded.access_token, status = 'connected', oauth_state = NULL, installed_at = datetime('now')`
+  ).bind(client.id, shop, token).run();
+
+  const store = await env.DB.prepare(`SELECT id FROM stores WHERE client_id = ? AND shop_domain = ?`)
+    .bind(client.id, shop).first<any>();
+  if (!store) return htmlResponse(connectPage(name, "Saved, but couldn't reopen the store. Go back to your dashboard."), 500);
+  return redirect(`/store/${store.id}/orders`);
 }
 
 async function startOAuth(env: Env, client: Client, shop: string): Promise<Response> {
