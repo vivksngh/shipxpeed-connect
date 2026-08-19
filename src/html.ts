@@ -83,6 +83,20 @@ tr:hover td{background:var(--panel2)}
 .muted{color:var(--mut)}
 .store{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border:1px solid var(--line);border-radius:12px;margin:0 0 10px;background:var(--panel2)}
 .bulkbar{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;padding:12px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;margin:0 0 14px}
+.filterbar{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.ftab{cursor:pointer;padding:8px 14px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);color:var(--mut);font-size:13.5px;font-family:inherit}
+.ftab:hover{border-color:var(--brand)}
+.ftab.active{background:var(--brand);border-color:var(--brand);color:#fff}
+.ftab .fc{display:inline-block;margin-left:6px;padding:0 7px;border-radius:999px;background:rgba(0,0,0,.22);font-size:12px}
+.ftab.active .fc{background:rgba(255,255,255,.22)}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
+.tin{padding:9px 11px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--txt);font-size:13.5px;font-family:inherit}
+.tin.sel{width:auto}
+#q{flex:1;min-width:220px}
+.dlbl{font-size:12px;color:var(--mut);display:inline-flex;align-items:center;gap:6px}
+.dlbl .tin{padding:7px 9px}
+.btn.xs{padding:5px 10px;font-size:12px}
+.rowact{margin-bottom:4px}
 details.od>summary{cursor:pointer;color:var(--brand2);font-size:13px}
 details.od pre{background:#0c0e18;border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;max-height:340px;font-size:12px;color:#c7cbe6}
 .small{font-size:12px;color:var(--mut)}
@@ -205,6 +219,13 @@ function fulChip(o: any): string {
   return `<span class="chip warn">unfulfilled</span>`;
 }
 
+function payMode(o: any): string {
+  const gw = (o?.payment_gateway_names ?? []).join(" ").toLowerCase();
+  if (gw.includes("cod") || gw.includes("cash on delivery")) return "COD";
+  if (!gw && o?.financial_status === "pending") return "COD";
+  return "Prepaid";
+}
+
 export function ordersPage(
   clientName: string,
   store: any,
@@ -212,6 +233,7 @@ export function ordersPage(
   procMap: Record<string, any>,
   notice?: string
 ): string {
+  const counts = { new: 0, fulfilled: 0, junk: 0 };
   const rows = orders
     .map((o) => {
       const proc = procMap[String(o.id)];
@@ -219,24 +241,61 @@ export function ordersPage(
       const ship = o.shipping_address;
       const place = ship ? `${ship.city ?? ""}${ship.province_code ? ", " + ship.province_code : ""}` : "";
       const items = (o.line_items ?? []).reduce((n: number, li: any) => n + (li.quantity ?? 0), 0);
-      const procChip = proc
-        ? `<span class="chip ${proc.status === "fulfilled" ? "ok" : proc.status === "error" ? "err" : ""}">${esc(proc.status)}${proc.awb ? " · " + esc(proc.awb) : ""}</span>`
-        : `<span class="chip">new</span>`;
-      return `<tr>
+      const st = proc?.status;
+      const awb = proc?.awb ? String(proc.awb) : "";
+      const cancelled = !!o.cancelled_at;
+      const isJunk = proc?.junk == 1;
+      const isFulfilled = o.fulfillment_status === "fulfilled" || st === "fulfilled";
+      // bucket: cancelled-on-Shopify or manually-junked -> junk; fulfilled -> fulfilled; everything else -> new
+      const bucket = cancelled || isJunk ? "junk" : isFulfilled ? "fulfilled" : "new";
+      counts[bucket]++;
+
+      const pay = payMode(o);
+      const phoneDigits = String(o.phone ?? ship?.phone ?? o.billing_address?.phone ?? "").replace(/\D/g, "");
+      const dateKey = (o.created_at ?? "").slice(0, 10); // YYYY-MM-DD
+      const searchBlob = `${o.name ?? ""} ${awb} ${phoneDigits} ${cust}`.toLowerCase();
+
+      // status chip
+      let procChip: string;
+      if (cancelled) procChip = `<span class="chip err">cancelled</span>`;
+      else if (isJunk) procChip = `<span class="chip err">junk</span>`;
+      else if (isFulfilled) procChip = `<span class="chip ok">fulfilled${awb ? " · " + esc(awb) : ""}</span>`;
+      else if (st === "exported") procChip = `<span class="chip warn">exported${awb ? " · " + esc(awb) : ""}</span>`;
+      else if (st === "shipped") procChip = `<span class="chip warn">awaiting AWB</span>`;
+      else procChip = `<span class="chip">new</span>`;
+
+      // junk / restore control (restore only for manually-junked; Shopify-cancelled can't be un-cancelled here)
+      let junkCtl = "";
+      if (isJunk && !cancelled) {
+        junkCtl = `<form method="post" action="/store/${store.id}/junk" style="display:inline">
+            <input type="hidden" name="order_id" value="${esc(o.id)}">
+            <input type="hidden" name="op" value="unjunk">
+            <button class="btn ghost xs" type="submit">↩ Restore</button></form>`;
+      } else if (!cancelled) {
+        junkCtl = `<form method="post" action="/store/${store.id}/junk" style="display:inline">
+            <input type="hidden" name="order_id" value="${esc(o.id)}">
+            <input type="hidden" name="op" value="junk">
+            <button class="btn ghost xs" type="submit">🗑 Junk</button></form>`;
+      }
+
+      return `<tr data-bucket="${bucket}" data-pay="${pay}" data-date="${esc(dateKey)}" data-search="${esc(searchBlob)}">
         <td><input type="checkbox" class="rowchk" name="order_ids" value="${esc(o.id)}" form="bulkform"></td>
         <td><b>${esc(o.name)}</b><div class="small">${fdate(o.created_at)}</div></td>
         <td>${esc(cust)}<div class="small">${esc(place)}</div></td>
         <td>${items}</td>
         <td>${money(o)}<div class="small">${esc(o.financial_status ?? "")}</div></td>
+        <td><span class="chip ${pay === "COD" ? "warn" : "ok"}">${pay}</span></td>
         <td>${fulChip(o)}</td>
         <td>${procChip}</td>
         <td>
+          <div class="rowact">${junkCtl}</div>
           <details class="od"><summary>Details</summary>
             <div class="grid2" style="margin:8px 0">
               <div>Order ID</div><div>${esc(o.id)}</div>
               <div>Email</div><div>${esc(o.email ?? "")}</div>
               <div>Phone</div><div>${esc(o.phone ?? ship?.phone ?? "")}</div>
-              <div>Payment</div><div>${esc((o.payment_gateway_names ?? []).join(", "))}</div>
+              <div>AWB</div><div>${esc(awb)}</div>
+              <div>Payment</div><div>${esc((o.payment_gateway_names ?? []).join(", "))} (${pay})</div>
             </div>
             <pre>${esc(JSON.stringify(o, null, 2))}</pre>
           </details>
@@ -255,9 +314,22 @@ export function ordersPage(
        </div>
      </div>
      ${notice ? `<div class="ok">${esc(notice)}</div>` : ""}
+     <div class="filterbar">
+       <button type="button" class="ftab active" data-filter="new">New <span class="fc">${counts.new}</span></button>
+       <button type="button" class="ftab" data-filter="fulfilled">Fulfilled <span class="fc">${counts.fulfilled}</span></button>
+       <button type="button" class="ftab" data-filter="junk">Cancelled / Junk <span class="fc">${counts.junk}</span></button>
+       <button type="button" class="ftab" data-filter="all">All <span class="fc">${orders.length}</span></button>
+     </div>
+     <div class="toolbar">
+       <input type="search" id="q" class="tin" placeholder="Search order #, AWB, or mobile…">
+       <select id="payf" class="tin sel"><option value="">Payment: All</option><option value="COD">COD only</option><option value="Prepaid">Prepaid only</option></select>
+       <label class="dlbl">From <input type="date" id="dfrom" class="tin"></label>
+       <label class="dlbl">To <input type="date" id="dto" class="tin"></label>
+       <button type="button" class="btn ghost xs" id="clearf">Clear</button>
+     </div>
      <form id="bulkform" method="post" action="/store/${store.id}/process">
        <div class="bulkbar">
-         <label style="margin:0"><input type="checkbox" id="selall"> Select all</label>
+         <label style="margin:0"><input type="checkbox" id="selall"> Select all <span id="selallhint" class="muted"></span></label>
          <span class="muted" id="selcount">0 selected</span>
          <div style="flex:1"></div>
          <button class="btn sm" type="button" id="openproc">Process → Export (Shipxpeed format)</button>
@@ -283,16 +355,56 @@ export function ordersPage(
      </form>
      <div class="card" style="padding:6px 6px">
        <table>
-         <thead><tr><th></th><th>Order</th><th>Customer</th><th>Qty</th><th>Total</th><th>Fulfillment</th><th>Status</th><th></th></tr></thead>
-         <tbody>${rows || `<tr><td colspan="8" class="muted" style="padding:20px">No orders found.</td></tr>`}</tbody>
+         <thead><tr><th></th><th>Order</th><th>Customer</th><th>Qty</th><th>Total</th><th>Payment</th><th>Fulfillment</th><th>Status</th><th></th></tr></thead>
+         <tbody>${rows || `<tr><td colspan="9" class="muted" style="padding:20px">No orders found.</td></tr>`}</tbody>
        </table>
+       <div id="noresults" class="muted" style="display:none;padding:18px">No orders match these filters.</div>
      </div>
      <script>
+       const allRows=()=>[...document.querySelectorAll('tr[data-bucket]')];
        const chks=()=>[...document.querySelectorAll('.rowchk')];
+       const visRows=()=>allRows().filter(r=>r.style.display!=='none');
+       const visChks=()=>visRows().map(r=>r.querySelector('.rowchk')).filter(Boolean);
        const selected=()=>chks().filter(c=>c.checked).length;
-       const upd=()=>{document.getElementById('selcount').textContent=selected()+' selected';};
-       document.getElementById('selall').addEventListener('change',e=>{chks().forEach(c=>c.checked=e.target.checked);upd();});
-       chks().forEach(c=>c.addEventListener('change',upd));upd();
+       const selall=document.getElementById('selall');
+       const qEl=document.getElementById('q');
+       const payEl=document.getElementById('payf');
+       const fromEl=document.getElementById('dfrom');
+       const toEl=document.getElementById('dto');
+       let filter='new';
+       const upd=()=>{
+         document.getElementById('selcount').textContent=selected()+' selected';
+         const v=visChks();
+         selall.checked=v.length>0 && v.every(c=>c.checked);
+       };
+       function applyFilters(){
+         document.querySelectorAll('.ftab').forEach(t=>t.classList.toggle('active',t.dataset.filter===filter));
+         const q=(qEl.value||'').trim().toLowerCase();
+         const pay=payEl.value;
+         const from=fromEl.value, to=toEl.value;
+         let shown=0;
+         allRows().forEach(r=>{
+           let ok=(filter==='all')||r.dataset.bucket===filter;
+           if(ok && q) ok=(r.dataset.search||'').indexOf(q)!==-1;
+           if(ok && pay) ok=r.dataset.pay===pay;
+           if(ok && from) ok=(r.dataset.date||'')>=from;
+           if(ok && to) ok=(r.dataset.date||'')<=to;
+           r.style.display=ok?'':'none';
+           if(ok) shown++; else {const c=r.querySelector('.rowchk'); if(c)c.checked=false;}
+         });
+         document.getElementById('noresults').style.display=shown?'none':'';
+         document.getElementById('selallhint').textContent='(only shown)';
+         upd();
+       }
+       document.querySelectorAll('.ftab').forEach(t=>t.addEventListener('click',()=>{filter=t.dataset.filter;applyFilters();}));
+       qEl.addEventListener('input',applyFilters);
+       payEl.addEventListener('change',applyFilters);
+       fromEl.addEventListener('change',applyFilters);
+       toEl.addEventListener('change',applyFilters);
+       document.getElementById('clearf').addEventListener('click',()=>{qEl.value='';payEl.value='';fromEl.value='';toEl.value='';applyFilters();});
+       selall.addEventListener('change',e=>{visChks().forEach(c=>c.checked=e.target.checked);upd();});
+       chks().forEach(c=>c.addEventListener('change',upd));
+       applyFilters();
        const modal=document.getElementById('procmodal');
        document.getElementById('openproc').addEventListener('click',()=>{ if(selected()===0){alert('Select at least one order first.');return;} modal.showModal(); });
        document.getElementById('cancelproc').addEventListener('click',()=>modal.close());
