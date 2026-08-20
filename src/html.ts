@@ -184,47 +184,55 @@ export function dashboardPage(clientName: string, stores: any[]): string {
   );
 }
 
-export function connectPage(clientName: string, error?: string, notice?: string): string {
+export function connectPage(clientName: string, error?: string, notice?: string, appUrl?: string): string {
+  const callback = `${(appUrl ?? "").replace(/\/$/, "")}/auth/shopify/callback`;
   return layout(
     "Connect store — Shipxpeed Connect",
     `<h1>Connect a Shopify store</h1>
-     <p class="sub">Connect with an <b>Admin API access token</b> — works on any store instantly, no Shopify app review needed.</p>
+     <p class="sub">Enter the store's own app credentials (Client ID + Secret). You'll be sent to Shopify to approve, then brought back — no app review needed.</p>
      ${error ? `<div class="err">${esc(error)}</div>` : ""}
      ${notice ? `<div class="ok">${esc(notice)}</div>` : ""}
      <div class="card" style="max-width:560px">
-       <form method="post" action="/connect/token">
+       <form method="post" action="/connect/oauth-app">
          <label>Store domain</label>
          <input type="text" name="shop" placeholder="your-store.myshopify.com" required autofocus>
          <div class="small" style="margin-top:4px">Example: pusti-feni-2.myshopify.com</div>
-         <label style="margin-top:14px">Admin API access token</label>
-         <input type="text" name="token" placeholder="shpat_..." required>
-         <div class="small" style="margin-top:4px">Starts with <code>shpat_</code>. See the steps below to create it.</div>
+         <label style="margin-top:14px">Client ID (API key)</label>
+         <input type="text" name="api_key" placeholder="e.g. 7211243..." required>
+         <label style="margin-top:14px">Client secret (API secret key)</label>
+         <input type="text" name="api_secret" placeholder="e.g. shpss_... or 32-char secret" required>
          <div style="height:16px"></div>
-         <button class="btn" type="submit">Connect store</button>
+         <button class="btn" type="submit">Connect &amp; authorize on Shopify →</button>
        </form>
      </div>
 
      <div class="card" style="max-width:560px;margin-top:16px">
-       <h3 style="margin-top:0">How the client gets the token (one-time, ~2 min)</h3>
+       <h3 style="margin-top:0">How to set up the store's app (one-time per store)</h3>
+       <p class="small" style="margin-top:0">Done in the store's own Shopify admin → <b>Settings → Apps and sales channels → Develop apps / Build apps in Dev Dashboard</b>.</p>
        <ol style="margin:0;padding-left:20px">
-         <li>In the store's Shopify admin, go to <b>Settings → Apps and sales channels → Develop apps</b>.</li>
-         <li>Click <b>Create an app</b>, name it e.g. <b>Shipzap</b>, then <b>Create app</b>.</li>
-         <li>Open <b>Configuration → Admin API integration → Configure</b>, and enable these scopes:
+         <li>Create an app (name it e.g. <b>Shipzap</b>).</li>
+         <li>Set the <b>Allowed redirection URL</b> (and App URL) to:
+           <div class="small" style="margin-top:4px"><code>${esc(callback)}</code></div>
+         </li>
+         <li>Enable these Admin API scopes:
            <div class="small" style="margin-top:4px"><code>read_orders</code>, <code>write_orders</code>, <code>read_fulfillments</code>, <code>write_fulfillments</code>, <code>read_merchant_managed_fulfillment_orders</code>, <code>write_merchant_managed_fulfillment_orders</code>, <code>read_products</code>, <code>read_customers</code>, <code>read_assigned_fulfillment_orders</code>, <code>write_assigned_fulfillment_orders</code></div>
-           then <b>Save</b>.</li>
-         <li>Go to the <b>API credentials</b> tab → <b>Install app</b> → confirm <b>Install</b>.</li>
-         <li>Copy the <b>Admin API access token</b> (shown once, starts with <code>shpat_</code>) and paste it above.</li>
+         </li>
+         <li>Under <b>Distribution</b>, choose <b>Custom distribution</b> and point it at that store (their own store — no review needed).</li>
+         <li>Copy the app's <b>Client ID</b> and <b>Client secret</b> and paste them above, then Connect.</li>
        </ol>
      </div>
 
      <details class="od" style="max-width:560px;margin-top:14px">
-       <summary>Advanced: connect via OAuth instead (needs an approved public app)</summary>
+       <summary>Alternative: connect with an Admin API token (older stores only)</summary>
        <div class="card" style="margin-top:10px">
-         <form method="post" action="/connect">
+         <form method="post" action="/connect/token">
            <label>Store domain</label>
            <input type="text" name="shop" placeholder="your-store.myshopify.com" required>
+           <label style="margin-top:12px">Admin API access token</label>
+           <input type="text" name="token" placeholder="shpat_..." required>
+           <div class="small" style="margin-top:4px">From an older store's <b>Develop apps → Install → API credentials → Admin API access token</b>.</div>
            <div style="height:12px"></div>
-           <button class="btn ghost sm" type="submit">Continue to Shopify →</button>
+           <button class="btn ghost sm" type="submit">Connect with token</button>
          </form>
        </div>
      </details>`,
