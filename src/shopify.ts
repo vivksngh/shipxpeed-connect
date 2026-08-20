@@ -45,6 +45,28 @@ export async function exchangeToken(
   return (await res.json()) as { access_token: string; scope: string };
 }
 
+// Mint an Admin API access token via the client-credentials grant (no OAuth redirect).
+// Works for an app developed in your own org and installed on a store you own.
+// The returned token is short-lived (~24h), so callers should mint fresh on demand.
+export async function mintAppToken(
+  shop: string,
+  apiKey: string,
+  apiSecret: string
+): Promise<string | null> {
+  const res = await fetch(`https://${shop}/admin/oauth/access_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: apiKey,
+      client_secret: apiSecret,
+    }).toString(),
+  });
+  if (!res.ok) return null;
+  const data = (await res.json()) as { access_token?: string };
+  return data.access_token ?? null;
+}
+
 export function apiBase(shop: string, version: string): string {
   return `https://${shop}/admin/api/${version}`;
 }
