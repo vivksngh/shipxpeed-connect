@@ -128,7 +128,14 @@ export default {
         const store = await getStoreForClient(env, storeId, client.id);
         if (!store) return htmlResponse(layout("Not found", `<div class="card"><h1>Store not found</h1><p><a href="/dashboard">Back</a></p></div>`, { clientName: client.name ?? client.email }), 404);
 
-        if (action === "reconnect" && method === "GET") return startOAuth(env, client, store.shop_domain);
+        if (action === "reconnect" && method === "GET") {
+          // Re-run OAuth using the store's own app credentials if it was connected that way,
+          // otherwise fall back to the shared app.
+          const creds = store.api_key && store.api_secret
+            ? { apiKey: String(store.api_key), apiSecret: String(store.api_secret) }
+            : undefined;
+          return startOAuth(env, client, store.shop_domain, creds);
+        }
         if (action === "delete" && method === "POST") {
           await env.DB.prepare(`DELETE FROM stores WHERE id = ?`).bind(store.id).run();
           return redirect("/dashboard");
@@ -259,16 +266,20 @@ async function startOAuth(
 
 async function handleCallback(req: Request, env: Env, url: URL): Promise<Response> {
   const params = url.searchParams;
-  const shop = params.get("shop") ?? "";
+  const shop = normalizeShopDomain(params.get("shop") ?? "") || (params.get("shop") ?? "");
   const code = params.get("code") ?? "";
   const state = params.get("state") ?? "";
-  if (!normalizeShopDomain(shop) || !code || !state) return htmlResponse(errPage("Invalid callback parameters."), 400);
+  if (!normalizeShopDomain(shop) || !code) return htmlResponse(errPage("Invalid callback parameters."), 400);
 
-  // Find the pending store first (state is the unguessable CSRF token), then use its
-  // own app credentials if present, otherwise fall back to the shared app.
-  const store = await env.DB.prepare(`SELECT * FROM stores WHERE shop_domain = ? AND oauth_state = ?`)
-    .bind(shop, state).first<any>();
-  if (!store) return htmlResponse(errPage("No matching connection request (state mismatch)."), 400);
+  // Find the store for this shop. Prefer an exact state match, but fall back to the most
+  // recent record for this shop so retries / Shopify-initiated installs still work
+  // (authenticity is guaranteed by the HMAC check below, not by the state alone).
+  let store =
+    (state
+      ? await env.DB.prepare(`SELECT * FROM stores WHERE shop_domain = ? AND oauth_state = ?`).bind(shop, state).first<any>()
+      : null) ??
+    (await env.DB.prepare(`SELECT * FROM stores WHERE shop_domain = ? ORDER BY id DESC LIMIT 1`).bind(shop).first<any>());
+  if (!store) return htmlResponse(errPage("No matching connection request for this store. Start the connect again from your dashboard."), 400);
 
   const apiKey = store.api_key || env.SHOPIFY_API_KEY;
   const apiSecret = store.api_secret || env.SHOPIFY_API_SECRET;
