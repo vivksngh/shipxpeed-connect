@@ -16,6 +16,7 @@ import {
   fetchShopInfo,
   findOrderIdByName,
   fulfillWithTracking,
+  mintAppToken,
 } from "./shopify";
 import { buildShipxpeedCsv, type ManualInput } from "./export";
 import {
@@ -201,8 +202,9 @@ async function handleConnect(req: Request, env: Env, client: Client): Promise<Re
   return startOAuth(env, client, shop);
 }
 
-// Connect a store using its OWN Shopify app credentials (Client ID + secret), via OAuth.
-// Each store's app is custom-distributed to that store, so no Shopify review is needed.
+// Connect a store using its OWN Shopify app credentials (Client ID + secret).
+// Uses the client-credentials grant — mints a token directly, no OAuth redirect,
+// no Shopify install screen, no app review. The app must be installed on the store.
 async function handleConnectOauthApp(req: Request, env: Env, client: Client): Promise<Response> {
   const name = client.name ?? client.email;
   const form = await req.formData();
@@ -211,7 +213,38 @@ async function handleConnectOauthApp(req: Request, env: Env, client: Client): Pr
   const apiSecret = String(form.get("api_secret") ?? "").trim();
   if (!shop) return htmlResponse(connectPage(name, "Please enter a valid .myshopify.com domain.", undefined, env.APP_URL), 400);
   if (!apiKey || !apiSecret) return htmlResponse(connectPage(name, "Please enter both the Client ID and Client secret from the store's app.", undefined, env.APP_URL), 400);
-  return startOAuth(env, client, shop, { apiKey, apiSecret });
+
+  const token = await mintAppToken(shop, apiKey, apiSecret);
+  if (!token) {
+    return htmlResponse(connectPage(name, "Couldn't get a token with those credentials. Make sure the app is installed on this store, the Client ID + secret are correct, and the store domain is right.", undefined, env.APP_URL), 400);
+  }
+  const info = await fetchShopInfo(shop, token, env.SHOPIFY_API_VERSION);
+  if (!info) {
+    return htmlResponse(connectPage(name, "Got a token, but couldn't read the store. Check that the app has the read_orders / fulfillment scopes enabled.", undefined, env.APP_URL), 400);
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO stores (client_id, shop_domain, access_token, status, oauth_state, api_key, api_secret, installed_at)
+     VALUES (?, ?, ?, 'connected', NULL, ?, ?, datetime('now'))
+     ON CONFLICT(client_id, shop_domain)
+     DO UPDATE SET access_token=excluded.access_token, status='connected', oauth_state=NULL,
+                   api_key=excluded.api_key, api_secret=excluded.api_secret, installed_at=datetime('now')`
+  ).bind(client.id, shop, token, apiKey, apiSecret).run();
+
+  const store = await env.DB.prepare(`SELECT id FROM stores WHERE client_id = ? AND shop_domain = ?`)
+    .bind(client.id, shop).first<any>();
+  if (!store) return htmlResponse(connectPage(name, "Connected, but couldn't reopen the store — go to your dashboard.", undefined, env.APP_URL), 500);
+  return redirect(`/store/${store.id}/orders`);
+}
+
+// Return a usable access token for a store: mint a fresh client-credentials token when the
+// store has app creds (they expire ~24h), otherwise use the stored token (token / OAuth connect).
+async function tokenFor(env: Env, store: any): Promise<string | null> {
+  if (store.api_key && store.api_secret) {
+    const t = await mintAppToken(store.shop_domain, String(store.api_key), String(store.api_secret));
+    if (t) return t;
+  }
+  return store.access_token ?? null;
 }
 
 // Connect a store directly with an Admin API access token (no OAuth / no app review).
@@ -293,8 +326,9 @@ async function handleCallback(req: Request, env: Env, url: URL): Promise<Respons
 }
 
 async function handleOrders(env: Env, client: Client, store: any): Promise<Response> {
-  if (!store.access_token) return redirect(`/store/${store.id}/reconnect`);
-  const orders = await fetchAllOrders(store.shop_domain, store.access_token, env.SHOPIFY_API_VERSION, { status: "any" });
+  const token = await tokenFor(env, store);
+  if (!token) return redirect(`/store/${store.id}/reconnect`);
+  const orders = await fetchAllOrders(store.shop_domain, token, env.SHOPIFY_API_VERSION, { status: "any" });
   const procRows = (await env.DB.prepare(`SELECT * FROM order_processing WHERE store_id = ?`).bind(store.id).all()).results ?? [];
   const procMap: Record<string, any> = {};
   for (const p of procRows as any[]) procMap[String(p.shopify_order_id)] = p;
@@ -337,7 +371,9 @@ async function handleProcess(req: Request, env: Env, client: Client, store: any)
     return redirect(`/store/${store.id}/orders`);
   }
 
-  const all = await fetchAllOrders(store.shop_domain, store.access_token, env.SHOPIFY_API_VERSION, { status: "any" });
+  const token = await tokenFor(env, store);
+  if (!token) return redirect(`/store/${store.id}/reconnect`);
+  const all = await fetchAllOrders(store.shop_domain, token, env.SHOPIFY_API_VERSION, { status: "any" });
   const selected = all.filter((o) => ids.has(String(o.id)));
   if (selected.length === 0) return redirect(`/store/${store.id}/orders`);
 
@@ -382,6 +418,9 @@ async function handleImport(req: Request, env: Env, client: Client, store: any):
     return htmlResponse(importPage(name, store, "Couldn't find the Order Number and AWB columns. Expected headers: Shopify Order Number, AWB, Shipment Status, Courier Name."), 400);
   }
 
+  const token = await tokenFor(env, store);
+  if (!token) return htmlResponse(importPage(name, store, "Couldn't get an access token for this store. Reconnect it from your dashboard."), 400);
+
   let stored = 0, fulfilled = 0, failed = 0;
   const errors: string[] = [];
 
@@ -399,7 +438,7 @@ async function handleImport(req: Request, env: Env, client: Client, store: any):
       `SELECT shopify_order_id, status FROM order_processing WHERE store_id = ? AND (order_number = ? OR order_number = ?)`
     ).bind(store.id, `#${clean}`, clean).first<any>();
     if (rec && !String(rec.shopify_order_id).startsWith("name:")) oid = String(rec.shopify_order_id);
-    if (!oid) oid = await findOrderIdByName(store.shop_domain, store.access_token, env.SHOPIFY_API_VERSION, num);
+    if (!oid) oid = await findOrderIdByName(store.shop_domain, token, env.SHOPIFY_API_VERSION, num);
     const alreadyFulfilled = rec?.status === "fulfilled";
 
     // store the AWB/status regardless
@@ -413,7 +452,7 @@ async function handleImport(req: Request, env: Env, client: Client, store: any):
 
     // fulfill in Shopify when we have both an order id and an AWB (skip if already fulfilled — status sync only)
     if (oid && awb && !alreadyFulfilled) {
-      const res = await fulfillWithTracking(store.shop_domain, store.access_token, env.SHOPIFY_API_VERSION, oid, awb, courier);
+      const res = await fulfillWithTracking(store.shop_domain, token, env.SHOPIFY_API_VERSION, oid, awb, courier);
       if (res.ok) {
         fulfilled++;
         await env.DB.prepare(`UPDATE order_processing SET status='fulfilled', fulfilled_at=datetime('now') WHERE store_id=? AND shopify_order_id=?`).bind(store.id, oid).run();
