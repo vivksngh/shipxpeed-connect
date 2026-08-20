@@ -116,9 +116,10 @@ export default {
         ).bind(client.id).all()).results ?? [];
         return htmlResponse(dashboardPage(client.name ?? client.email, stores));
       }
-      if (path === "/connect" && method === "GET") return htmlResponse(connectPage(client.name ?? client.email));
+      if (path === "/connect" && method === "GET") return htmlResponse(connectPage(client.name ?? client.email, undefined, undefined, env.APP_URL));
       if (path === "/connect" && method === "POST") return handleConnect(req, env, client);
-      if (path === "/connect/token" && method === "GET") return htmlResponse(connectPage(client.name ?? client.email));
+      if (path === "/connect/oauth-app" && method === "POST") return handleConnectOauthApp(req, env, client);
+      if (path === "/connect/token" && method === "GET") return htmlResponse(connectPage(client.name ?? client.email, undefined, undefined, env.APP_URL));
       if (path === "/connect/token" && method === "POST") return handleConnectToken(req, env, client);
 
       const m = path.match(/^\/store\/(\d+)\/(orders|reconnect|process|import|delete|junk)$/);
@@ -189,8 +190,21 @@ async function handleLogout(req: Request, env: Env): Promise<Response> {
 async function handleConnect(req: Request, env: Env, client: Client): Promise<Response> {
   const form = await req.formData();
   const shop = normalizeShopDomain(String(form.get("shop") ?? ""));
-  if (!shop) return htmlResponse(connectPage(client.name ?? client.email, "Please enter a valid .myshopify.com domain."), 400);
+  if (!shop) return htmlResponse(connectPage(client.name ?? client.email, "Please enter a valid .myshopify.com domain.", undefined, env.APP_URL), 400);
   return startOAuth(env, client, shop);
+}
+
+// Connect a store using its OWN Shopify app credentials (Client ID + secret), via OAuth.
+// Each store's app is custom-distributed to that store, so no Shopify review is needed.
+async function handleConnectOauthApp(req: Request, env: Env, client: Client): Promise<Response> {
+  const name = client.name ?? client.email;
+  const form = await req.formData();
+  const shop = normalizeShopDomain(String(form.get("shop") ?? ""));
+  const apiKey = String(form.get("api_key") ?? "").trim();
+  const apiSecret = String(form.get("api_secret") ?? "").trim();
+  if (!shop) return htmlResponse(connectPage(name, "Please enter a valid .myshopify.com domain.", undefined, env.APP_URL), 400);
+  if (!apiKey || !apiSecret) return htmlResponse(connectPage(name, "Please enter both the Client ID and Client secret from the store's app.", undefined, env.APP_URL), 400);
+  return startOAuth(env, client, shop, { apiKey, apiSecret });
 }
 
 // Connect a store directly with an Admin API access token (no OAuth / no app review).
@@ -199,14 +213,14 @@ async function handleConnectToken(req: Request, env: Env, client: Client): Promi
   const form = await req.formData();
   const shop = normalizeShopDomain(String(form.get("shop") ?? ""));
   const token = String(form.get("token") ?? "").trim();
-  if (!shop) return htmlResponse(connectPage(name, "Please enter a valid .myshopify.com domain."), 400);
-  if (!token) return htmlResponse(connectPage(name, "Please paste the Admin API access token (starts with shpat_)."), 400);
+  if (!shop) return htmlResponse(connectPage(name, "Please enter a valid .myshopify.com domain.", undefined, env.APP_URL), 400);
+  if (!token) return htmlResponse(connectPage(name, "Please paste the Admin API access token (starts with shpat_).", undefined, env.APP_URL), 400);
 
   // Validate the token by calling the Shop endpoint.
   const info = await fetchShopInfo(shop, token, env.SHOPIFY_API_VERSION);
   if (!info) {
     return htmlResponse(
-      connectPage(name, "Couldn't connect with that token. Check the store domain and token, and that the custom app is installed with order + fulfillment scopes."),
+      connectPage(name, "Couldn't connect with that token. Check the store domain and token, and that the custom app is installed with order + fulfillment scopes.", undefined, env.APP_URL),
       400
     );
   }
@@ -220,20 +234,27 @@ async function handleConnectToken(req: Request, env: Env, client: Client): Promi
 
   const store = await env.DB.prepare(`SELECT id FROM stores WHERE client_id = ? AND shop_domain = ?`)
     .bind(client.id, shop).first<any>();
-  if (!store) return htmlResponse(connectPage(name, "Saved, but couldn't reopen the store. Go back to your dashboard."), 500);
+  if (!store) return htmlResponse(connectPage(name, "Saved, but couldn't reopen the store. Go back to your dashboard.", undefined, env.APP_URL), 500);
   return redirect(`/store/${store.id}/orders`);
 }
 
-async function startOAuth(env: Env, client: Client, shop: string): Promise<Response> {
+async function startOAuth(
+  env: Env,
+  client: Client,
+  shop: string,
+  creds?: { apiKey: string; apiSecret: string }
+): Promise<Response> {
   const state = randomToken(16);
+  const apiKey = creds?.apiKey || env.SHOPIFY_API_KEY;
+  // Store per-store credentials (null when using the shared app) alongside the state.
   await env.DB.prepare(
-    `INSERT INTO stores (client_id, shop_domain, oauth_state, status)
-     VALUES (?, ?, ?, 'pending')
+    `INSERT INTO stores (client_id, shop_domain, oauth_state, status, api_key, api_secret)
+     VALUES (?, ?, ?, 'pending', ?, ?)
      ON CONFLICT(client_id, shop_domain)
-     DO UPDATE SET oauth_state = excluded.oauth_state`
-  ).bind(client.id, shop, state).run();
+     DO UPDATE SET oauth_state = excluded.oauth_state, api_key = excluded.api_key, api_secret = excluded.api_secret`
+  ).bind(client.id, shop, state, creds?.apiKey ?? null, creds?.apiSecret ?? null).run();
   const redirectUri = `${env.APP_URL}/auth/shopify/callback`;
-  return redirect(buildAuthorizeUrl(shop, env.SHOPIFY_API_KEY, env.SHOPIFY_SCOPES, redirectUri, state));
+  return redirect(buildAuthorizeUrl(shop, apiKey, env.SHOPIFY_SCOPES, redirectUri, state));
 }
 
 async function handleCallback(req: Request, env: Env, url: URL): Promise<Response> {
@@ -242,13 +263,18 @@ async function handleCallback(req: Request, env: Env, url: URL): Promise<Respons
   const code = params.get("code") ?? "";
   const state = params.get("state") ?? "";
   if (!normalizeShopDomain(shop) || !code || !state) return htmlResponse(errPage("Invalid callback parameters."), 400);
-  if (!(await verifyShopifyHmac(params, env.SHOPIFY_API_SECRET))) return htmlResponse(errPage("HMAC verification failed."), 400);
 
+  // Find the pending store first (state is the unguessable CSRF token), then use its
+  // own app credentials if present, otherwise fall back to the shared app.
   const store = await env.DB.prepare(`SELECT * FROM stores WHERE shop_domain = ? AND oauth_state = ?`)
     .bind(shop, state).first<any>();
   if (!store) return htmlResponse(errPage("No matching connection request (state mismatch)."), 400);
 
-  const tok = await exchangeToken(shop, env.SHOPIFY_API_KEY, env.SHOPIFY_API_SECRET, code);
+  const apiKey = store.api_key || env.SHOPIFY_API_KEY;
+  const apiSecret = store.api_secret || env.SHOPIFY_API_SECRET;
+  if (!(await verifyShopifyHmac(params, apiSecret))) return htmlResponse(errPage("HMAC verification failed."), 400);
+
+  const tok = await exchangeToken(shop, apiKey, apiSecret, code);
   await env.DB.prepare(
     `UPDATE stores SET access_token = ?, scope = ?, status = 'connected', oauth_state = NULL, installed_at = datetime('now') WHERE id = ?`
   ).bind(tok.access_token, tok.scope, store.id).run();
