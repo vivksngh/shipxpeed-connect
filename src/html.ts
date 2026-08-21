@@ -358,7 +358,7 @@ export function ordersPage(
        <button type="button" class="ftab" data-filter="all">All <span class="fc">${orders.length}</span></button>
      </div>
      <div class="toolbar">
-       <input type="search" id="q" class="tin" placeholder="Search order #, AWB, or mobile…">
+       <input type="search" id="q" class="tin" placeholder="Search order #, AWB, mobile — paste many (comma or space separated)…">
        <select id="payf" class="tin sel"><option value="">Payment: All</option><option value="COD">COD only</option><option value="Prepaid">Prepaid only</option></select>
        <label class="dlbl">From <input type="date" id="dfrom" class="tin"></label>
        <label class="dlbl">To <input type="date" id="dto" class="tin"></label>
@@ -422,7 +422,11 @@ export function ordersPage(
          let shown=0;
          allRows().forEach(r=>{
            let ok=(filter==='all')||r.dataset.bucket===filter;
-           if(ok && q) ok=(r.dataset.search||'').indexOf(q)!==-1;
+           if(ok && q){
+             const toks=q.split(/[\s,]+/).filter(Boolean);
+             const blob=r.dataset.search||'';
+             ok=toks.length===0 || toks.some(t=>blob.indexOf(t)!==-1);
+           }
            if(ok && pay) ok=r.dataset.pay===pay;
            if(ok && from) ok=(r.dataset.date||'')>=from;
            if(ok && to) ok=(r.dataset.date||'')<=to;
