@@ -423,7 +423,7 @@ export function ordersPage(
          allRows().forEach(r=>{
            let ok=(filter==='all')||r.dataset.bucket===filter;
            if(ok && q){
-             const toks=q.split(/[\s,]+/).filter(Boolean);
+             const toks=q.split(/[\\s,]+/).filter(Boolean);
              const blob=r.dataset.search||'';
              ok=toks.length===0 || toks.some(t=>blob.indexOf(t)!==-1);
            }
