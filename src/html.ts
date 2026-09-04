@@ -18,10 +18,11 @@ interface LayoutOpts {
 export function layout(title: string, body: string, opts: LayoutOpts = {}): string {
   const nav = opts.clientName
     ? `<nav class="topbar">
-        <a class="brand" href="/dashboard">Shipxpeed <span>Connect</span></a>
+        <a class="brand" href="/dashboard">Vivekreyansh <span>Connect</span></a>
         <div class="navlinks">
           <a href="/dashboard" class="${opts.active === "dashboard" ? "on" : ""}">Stores</a>
           <a href="/api-orders" class="${opts.active === "apiorders" ? "on" : ""}">API orders</a>
+          <a href="/warehouses" class="${opts.active === "warehouses" ? "on" : ""}">Warehouses</a>
           <a href="/api-keys" class="${opts.active === "apikeys" ? "on" : ""}">API keys</a>
         </div>
         <div class="navuser">
@@ -115,10 +116,10 @@ dialog.modal::backdrop{background:rgba(4,6,14,.6)}
 
 export function loginPage(error?: string, notice?: string): string {
   return layout(
-    "Login — Shipxpeed Connect",
+    "Login — Vivekreyansh Connect",
     `<div class="center">
       <div class="card">
-        <h1>Shipxpeed <span style="color:var(--brand2)">Connect</span></h1>
+        <h1>Vivekreyansh <span style="color:var(--brand2)">Connect</span></h1>
         <p class="sub">Sign in to manage your Shopify orders.</p>
         ${error ? `<div class="err">${esc(error)}</div>` : ""}
         ${notice ? `<div class="ok">${esc(notice)}</div>` : ""}
@@ -137,7 +138,7 @@ export function loginPage(error?: string, notice?: string): string {
 
 export function setupPage(key: string, error?: string): string {
   return layout(
-    "Setup — Shipxpeed Connect",
+    "Setup — Vivekreyansh Connect",
     `<div class="center"><div class="card">
       <h1>Create a client login</h1>
       <p class="sub">One-time setup — keep this URL private (it needs your setup key).</p>
@@ -178,7 +179,7 @@ export function dashboardPage(clientName: string, stores: any[]): string {
     : `<p class="muted">No stores connected yet.</p>`;
 
   return layout(
-    "Stores — Shipxpeed Connect",
+    "Stores — Vivekreyansh Connect",
     `<div class="spread"><h1>Your stores</h1><a class="btn" href="/connect">+ Connect a store</a></div>
      <p class="sub">Connect a Shopify store, then fetch and process its orders.</p>
      <div class="card">${list}</div>`,
@@ -189,7 +190,7 @@ export function dashboardPage(clientName: string, stores: any[]): string {
 export function connectPage(clientName: string, error?: string, notice?: string, appUrl?: string): string {
   const callback = `${(appUrl ?? "").replace(/\/$/, "")}/auth/shopify/callback`;
   return layout(
-    "Connect store — Shipxpeed Connect",
+    "Connect store — Vivekreyansh Connect",
     `<h1>Connect a Shopify store</h1>
      <p class="sub">Enter the store's own app credentials (Client ID + Secret). You'll be sent to Shopify to approve, then brought back — no app review needed.</p>
      ${error ? `<div class="err">${esc(error)}</div>` : ""}
