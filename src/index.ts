@@ -28,6 +28,7 @@ import {
   handleRevokeApiKey,
   apiOrdersPage,
   handleApiOrdersProcess,
+  warehousesPage,
 } from "./api";
 import {
   layout,
@@ -134,6 +135,7 @@ export default {
         return htmlResponse(dashboardPage(client.name ?? client.email, stores));
       }
       // ---- API orders + keys (panel, cookie-auth) ----
+      if (path === "/warehouses" && method === "GET") return htmlResponse(await warehousesPage(env, client));
       if (path === "/api-orders" && method === "GET") return htmlResponse(await apiOrdersPage(env, client, url));
       if (path === "/api-orders/process" && method === "POST") return handleApiOrdersProcess(env, client, req);
       if (path === "/api-keys" && method === "GET") return htmlResponse(await apiKeysPage(env, client));
