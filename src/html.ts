@@ -21,6 +21,8 @@ export function layout(title: string, body: string, opts: LayoutOpts = {}): stri
         <a class="brand" href="/dashboard">Shipxpeed <span>Connect</span></a>
         <div class="navlinks">
           <a href="/dashboard" class="${opts.active === "dashboard" ? "on" : ""}">Stores</a>
+          <a href="/api-orders" class="${opts.active === "apiorders" ? "on" : ""}">API orders</a>
+          <a href="/api-keys" class="${opts.active === "apikeys" ? "on" : ""}">API keys</a>
         </div>
         <div class="navuser">
           <span>${esc(opts.clientName)}</span>
