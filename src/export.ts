@@ -11,10 +11,10 @@ export const SHIPXPEED_HEADER = [
   "City*",
   "State*",
   "Pincode*",
-  "Return Address Name",
+  "Return Address",
   "Warehouse Name*",
   "Auto Pickup*",
-  "Weight(in kgs)",
+  "Weight*",
   "Length*",
   "Width*",
   "Height*",
@@ -119,7 +119,7 @@ export function buildShipxpeedRows(orders: any[], m: ManualInput): string[][] {
         row[8] = pick(ship?.zip, bill?.zip);                     // Pincode
         row[9] = "";                                             // Return Address Name (blank)
         row[10] = m.warehouse;                                   // Warehouse Name
-        row[11] = m.autoPickup ?? "";                            // Auto Pickup (blank per logic)
+        row[11] = m.autoPickup || "Yes";                         // Auto Pickup (default Yes = use saved courier priority)
         row[12] = m.weight;                                      // Weight
         row[13] = m.length;                                      // Length
         row[14] = m.width;                                       // Width
