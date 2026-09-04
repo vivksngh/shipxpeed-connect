@@ -20,6 +20,16 @@ import {
 } from "./shopify";
 import { buildShipxpeedCsv, type ManualInput } from "./export";
 import {
+  handleApiCreateOrders,
+  handleApiGetOrder,
+  handleApiListOrders,
+  apiKeysPage,
+  handleCreateApiKey,
+  handleRevokeApiKey,
+  apiOrdersPage,
+  handleApiOrdersProcess,
+} from "./api";
+import {
   layout,
   loginPage,
   setupPage,
@@ -107,6 +117,12 @@ export default {
       if (path === "/auth/shopify/callback" && method === "GET") return handleCallback(req, env, url);
       if (path === "/healthz") return new Response("ok");
 
+      // ---- public intake API (Bearer-auth, no cookie) ----
+      if (path === "/api/v1/orders" && method === "POST") return handleApiCreateOrders(req, env);
+      if (path === "/api/v1/orders" && method === "GET") return handleApiListOrders(req, env, url);
+      const apiGet = path.match(/^\/api\/v1\/orders\/([^/]+)$/);
+      if (apiGet && method === "GET") return handleApiGetOrder(req, env, decodeURIComponent(apiGet[1]));
+
       // authenticated routes
       const client = await getSessionClient(req, env);
       if (!client) return redirect("/login");
@@ -117,6 +133,14 @@ export default {
         ).bind(client.id).all()).results ?? [];
         return htmlResponse(dashboardPage(client.name ?? client.email, stores));
       }
+      // ---- API orders + keys (panel, cookie-auth) ----
+      if (path === "/api-orders" && method === "GET") return htmlResponse(await apiOrdersPage(env, client, url));
+      if (path === "/api-orders/process" && method === "POST") return handleApiOrdersProcess(env, client, req);
+      if (path === "/api-keys" && method === "GET") return htmlResponse(await apiKeysPage(env, client));
+      if (path === "/api-keys" && method === "POST") return handleCreateApiKey(env, client, req);
+      const revoke = path.match(/^\/api-keys\/(\d+)\/revoke$/);
+      if (revoke && method === "POST") return handleRevokeApiKey(env, client, revoke[1]);
+
       if (path === "/connect" && method === "GET") return htmlResponse(connectPage(client.name ?? client.email, undefined, undefined, env.APP_URL));
       if (path === "/connect" && method === "POST") return handleConnect(req, env, client);
       if (path === "/connect/oauth-app" && method === "POST") return handleConnectOauthApp(req, env, client);
