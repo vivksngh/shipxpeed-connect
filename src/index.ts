@@ -31,6 +31,12 @@ import {
   warehousesPage,
 } from "./api";
 import {
+  handlePendingWarehouses,
+  handleWarehouseCreated,
+  handleAutomationExport,
+  handleWriteback,
+} from "./automation";
+import {
   layout,
   loginPage,
   setupPage,
@@ -123,6 +129,12 @@ export default {
       if (path === "/api/v1/orders" && method === "GET") return handleApiListOrders(req, env, url);
       const apiGet = path.match(/^\/api\/v1\/orders\/([^/]+)$/);
       if (apiGet && method === "GET") return handleApiGetOrder(req, env, decodeURIComponent(apiGet[1]));
+
+      // ---- automation API (Bearer AUTOMATION_TOKEN, no cookie) ----
+      if (path === "/automation/pending-warehouses" && method === "GET") return handlePendingWarehouses(req, env);
+      if (path === "/automation/warehouse-created" && method === "POST") return handleWarehouseCreated(req, env);
+      if (path === "/automation/export" && method === "GET") return handleAutomationExport(req, env);
+      if (path === "/automation/writeback" && method === "POST") return handleWriteback(req, env);
 
       // authenticated routes
       const client = await getSessionClient(req, env);
