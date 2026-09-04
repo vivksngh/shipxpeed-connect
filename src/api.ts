@@ -48,6 +48,63 @@ export async function authApiKey(req: Request, env: Env): Promise<{ client_id: n
 }
 
 // ---------- normalize + validate an incoming order ----------
+// ---------- pickup / warehouse ----------
+// Validate the pickup address (the fields Shipxpeed needs to create a warehouse).
+function normalizePickup(raw: any): { ok: true; value: any } | { ok: false; errors: string[] } {
+  const e: string[] = [];
+  const p = raw ?? {};
+  const name = String(p.name ?? "").trim();
+  const contact = String(p.contact ?? p.contact_name ?? "").trim();
+  const phone = String(p.phone ?? "").replace(/\D/g, "");
+  const email = String(p.email ?? "").trim();
+  const address = String(p.address ?? p.line1 ?? "").trim();
+  const pincode = String(p.pincode ?? "").trim();
+  const city = String(p.city ?? "").trim();
+  const state = String(p.state ?? "").trim();
+  if (!name) e.push("pickup.name is required");
+  if (!contact) e.push("pickup.contact is required");
+  if (phone.length < 10) e.push("pickup.phone must be a valid phone number");
+  if (!email) e.push("pickup.email is required");
+  if (!address) e.push("pickup.address is required");
+  if (!pincode) e.push("pickup.pincode is required");
+  if (!city) e.push("pickup.city is required");
+  if (!state) e.push("pickup.state is required");
+  if (e.length) return { ok: false, errors: e };
+  return { ok: true, value: { name, contact, phone, email, address, pincode, city, state } };
+}
+
+// A stable fingerprint over every warehouse field — any change means a new warehouse.
+function whFingerprintInput(p: any): string {
+  const n = (s: string) => String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  return [n(p.name), n(p.contact), n(p.phone), n(p.email), n(p.address), n(p.pincode), n(p.city), n(p.state)].join("|");
+}
+
+// Find or create the warehouse for a pickup. New unique pickups get a fresh row
+// (status 'pending') with a name unique within the client, ready to create in Shipxpeed.
+async function resolveWarehouse(env: Env, clientId: number, p: any): Promise<{ id: number; name: string; status: string }> {
+  const fp = await sha256Hex(whFingerprintInput(p));
+  const existing = await env.DB.prepare(
+    `SELECT id, name, shipxpeed_status FROM warehouses WHERE client_id = ? AND fingerprint = ?`
+  ).bind(clientId, fp).first<any>();
+  if (existing) return { id: existing.id, name: existing.name, status: existing.shipxpeed_status };
+
+  const base = p.name || (p.city ? `${p.city} Pickup` : "Warehouse");
+  let name = base, i = 1;
+  while (await env.DB.prepare(`SELECT id FROM warehouses WHERE client_id = ? AND name = ?`).bind(clientId, name).first()) {
+    i++; name = `${base} ${i}`;
+  }
+  try {
+    const res = await env.DB.prepare(
+      `INSERT INTO warehouses (client_id, name, contact_name, phone, email, address, pincode, city, state, fingerprint, shipxpeed_status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`
+    ).bind(clientId, name, p.contact, p.phone, p.email, p.address, p.pincode, p.city, p.state, fp).run();
+    const id = (res as any)?.meta?.last_row_id;
+    if (id) return { id: Number(id), name, status: "pending" };
+  } catch { /* unique clash from a concurrent insert — fall through to re-select */ }
+  const row = await env.DB.prepare(`SELECT id, name, shipxpeed_status FROM warehouses WHERE client_id = ? AND fingerprint = ?`).bind(clientId, fp).first<any>();
+  return { id: row.id, name: row.name, status: row.shipxpeed_status };
+}
+
 const REQUIRED_MSG = "Missing or invalid fields";
 
 function normalizeOrder(raw: any): { ok: true; value: any } | { ok: false; errors: string[] } {
@@ -78,11 +135,15 @@ function normalizeOrder(raw: any): { ok: true; value: any } | { ok: false; error
   const items = Array.isArray(raw?.items) ? raw.items : [];
   if (!items.length) errors.push("items must be a non-empty array");
 
+  const pk = normalizePickup(raw?.pickup);
+  if (!pk.ok) errors.push(...pk.errors);
+
   if (errors.length) return { ok: false, errors };
 
   return {
     ok: true,
     value: {
+      pickup: (pk as { ok: true; value: any }).value,
       external_order_id: extId,
       order_number: String(raw.order_number ?? extId).trim(),
       payment_mode: pay,
@@ -108,23 +169,24 @@ function normalizeOrder(raw: any): { ok: true; value: any } | { ok: false; error
   };
 }
 
-async function upsertOrder(env: Env, clientId: number, keyId: number, o: any): Promise<string> {
+async function upsertOrder(env: Env, clientId: number, keyId: number, o: any, wh: { id: number; name: string }): Promise<string> {
   await env.DB.prepare(
     `INSERT INTO api_orders
        (client_id, api_key_id, external_order_id, order_number, payment_mode, amount, currency,
         customer_json, address_json, items_json, weight_kg, length_cm, width_cm, height_cm,
-        callback_url, status, updated_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', datetime('now'), datetime('now'))
+        callback_url, warehouse_id, warehouse_name, status, updated_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', datetime('now'), datetime('now'))
      ON CONFLICT(client_id, external_order_id) DO UPDATE SET
         order_number=excluded.order_number, payment_mode=excluded.payment_mode, amount=excluded.amount,
         currency=excluded.currency, customer_json=excluded.customer_json, address_json=excluded.address_json,
         items_json=excluded.items_json, weight_kg=excluded.weight_kg, length_cm=excluded.length_cm,
         width_cm=excluded.width_cm, height_cm=excluded.height_cm, callback_url=excluded.callback_url,
+        warehouse_id=excluded.warehouse_id, warehouse_name=excluded.warehouse_name,
         updated_at=datetime('now')`
   ).bind(
     clientId, keyId, o.external_order_id, o.order_number, o.payment_mode, o.amount, o.currency,
     JSON.stringify(o.customer), JSON.stringify(o.address), JSON.stringify(o.items),
-    o.weight_kg, o.length_cm, o.width_cm, o.height_cm, o.callback_url
+    o.weight_kg, o.length_cm, o.width_cm, o.height_cm, o.callback_url, wh.id, wh.name
   ).run();
   return o.external_order_id;
 }
@@ -147,9 +209,10 @@ export async function handleApiCreateOrders(req: Request, env: Env): Promise<Res
     const n = normalizeOrder(raw);
     if (!n.ok) { results.push({ external_order_id: raw?.external_order_id ?? null, status: "rejected", errors: n.errors }); continue; }
     try {
-      await upsertOrder(env, auth.client_id, auth.api_key_id, n.value);
+      const wh = await resolveWarehouse(env, auth.client_id, n.value.pickup);
+      await upsertOrder(env, auth.client_id, auth.api_key_id, n.value, wh);
       accepted++;
-      results.push({ external_order_id: n.value.external_order_id, status: "received" });
+      results.push({ external_order_id: n.value.external_order_id, status: "received", warehouse: wh.name, warehouse_new: wh.status === "pending" });
     } catch (e: any) {
       results.push({ external_order_id: n.value.external_order_id, status: "error", message: String(e?.message ?? e).slice(0, 200) });
     }
@@ -165,6 +228,7 @@ function orderView(row: any): any {
     amount: row.amount,
     currency: row.currency,
     status: row.status,             // received | exported | placed | shipped | delivered | cancelled | error
+    warehouse: row.warehouse_name ?? null,
     awb: row.awb ?? null,
     courier: row.courier ?? null,
     shipment_status: row.shipment_status ?? null,
@@ -249,6 +313,8 @@ export async function apiKeysPage(env: Env, client: Client, justCreated?: string
     "amount": 529.00,
     "customer": { "name": "Riya Sharma", "phone": "9876543210", "email": "riya@example.com" },
     "address": { "line1": "12 MG Road", "city": "Pune", "state": "Maharashtra", "pincode": "411001", "country": "IN" },
+    "pickup": { "name": "Mumbai WH", "contact": "Rahul", "phone": "9820000000", "email": "wh@brand.com",
+                "address": "Plot 5, Andheri MIDC", "pincode": "400093", "city": "Mumbai", "state": "Maharashtra" },
     "items": [ { "sku": "TSHIRT-M", "name": "Cotton T-Shirt", "qty": 1, "price": 529.00 } ],
     "weight_kg": 0.4, "length_cm": 25, "width_cm": 20, "height_cm": 4,
     "callback_url": "https://brand.example.com/shipxpeed-webhook"
@@ -284,7 +350,7 @@ export async function apiOrdersPage(env: Env, client: Client, url: URL): Promise
   let sql = `SELECT * FROM api_orders WHERE client_id = ?`;
   const binds: any[] = [client.id];
   if (tab !== "all" && STATUS_TABS.includes(tab)) { sql += ` AND status = ?`; binds.push(tab); }
-  if (q) { sql += ` AND (external_order_id LIKE ? OR order_number LIKE ? OR awb LIKE ? OR customer_json LIKE ?)`; const like = `%${q}%`; binds.push(like, like, like, like); }
+  if (q) { sql += ` AND (external_order_id LIKE ? OR order_number LIKE ? OR awb LIKE ? OR customer_json LIKE ? OR warehouse_name LIKE ?)`; const like = `%${q}%`; binds.push(like, like, like, like, like); }
   sql += ` ORDER BY updated_at DESC LIMIT 500`;
   const rows = (await env.DB.prepare(sql).bind(...binds).all()).results ?? [];
 
@@ -318,6 +384,7 @@ export async function apiOrdersPage(env: Env, client: Client, url: URL): Promise
       <td>${esc(cust.name || "")}<div class="mut">${esc(addr.city || "")}, ${esc(addr.state || "")}</div></td>
       <td>${esc(o.payment_mode)}</td>
       <td>${o.amount ? esc(o.currency) + " " + esc(o.amount) : ""}</td>
+      <td>${esc(o.warehouse_name || "")}</td>
       <td>${esc(o.courier || "")}</td>
       <td>${statusChip(o.status, o.awb)}${o.shipment_status ? `<div class="mut">${esc(o.shipment_status)}</div>` : ""}</td>
     </tr>`;
@@ -333,19 +400,19 @@ export async function apiOrdersPage(env: Env, client: Client, url: URL): Promise
     </form>
     <form id="apiproc" method="post" action="/api-orders/process" class="card" style="padding:14px;margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
       <b>Export selected → Shipxpeed CSV:</b>
-      <input type="text" name="warehouse" placeholder="Warehouse *" required style="width:auto">
       <select name="service_type" style="width:auto"><option>Surface</option><option>Air</option></select>
       <input type="number" step="0.01" name="weight" placeholder="Def. wt (kg)" style="width:110px">
       <input type="number" step="0.1" name="length" placeholder="L" style="width:70px">
       <input type="number" step="0.1" name="width" placeholder="W" style="width:70px">
       <input type="number" step="0.1" name="height" placeholder="H" style="width:70px">
+      <input type="text" name="warehouse" placeholder="Fallback warehouse (optional)" style="width:auto">
       <button class="btn sm" type="submit">Export ↓</button>
-      <span class="mut" style="font-size:13px">Per-order weight/dimensions are used when present; the defaults fill the rest.</span>
+      <span class="mut" style="font-size:13px">Each order uses its own captured warehouse; the fallback fills any order missing one. Per-order weight/dimensions are used when present, else the defaults.</span>
     </form>
     <div class="card" style="padding:6px 6px">
       <table>
-        <thead><tr><th></th><th>Order</th><th>Customer</th><th>Payment</th><th>Amount</th><th>Courier</th><th>Status</th></tr></thead>
-        <tbody>${body || `<tr><td colspan="7" class="mut" style="padding:18px">No orders in this tab.</td></tr>`}</tbody>
+        <thead><tr><th></th><th>Order</th><th>Customer</th><th>Payment</th><th>Amount</th><th>Warehouse</th><th>Courier</th><th>Status</th></tr></thead>
+        <tbody>${body || `<tr><td colspan="8" class="mut" style="padding:18px">No orders in this tab.</td></tr>`}</tbody>
       </table>
     </div>`;
   return layout("API orders", inner, { clientName: client.name ?? client.email, active: "apiorders", wide: true });
@@ -379,13 +446,12 @@ export async function handleApiOrdersProcess(env: Env, client: Client, req: Requ
   const ids = form.getAll("order_ids").map(String).filter(Boolean);
   if (!ids.length) return new Response(null, { status: 302, headers: { Location: "/api-orders" } });
 
-  const warehouse = String(form.get("warehouse") ?? "").trim();
+  const fallbackWarehouse = String(form.get("warehouse") ?? "").trim();
   const serviceType = String(form.get("service_type") ?? "Surface").trim();
   const dWeight = String(form.get("weight") ?? "").trim();
   const dLen = String(form.get("length") ?? "").trim();
   const dWid = String(form.get("width") ?? "").trim();
   const dHt = String(form.get("height") ?? "").trim();
-  if (!warehouse) return new Response(await apiOrdersPage(env, client, new URL(req.url)), { status: 400, headers: { "Content-Type": "text/html; charset=utf-8" } });
 
   const placeholders = ids.map(() => "?").join(",");
   const rows = (await env.DB.prepare(
@@ -393,11 +459,11 @@ export async function handleApiOrdersProcess(env: Env, client: Client, req: Requ
   ).bind(client.id, ...ids).all()).results ?? [];
   if (!rows.length) return new Response(null, { status: 302, headers: { Location: "/api-orders" } });
 
-  // build CSV rows per-order so each order's own weight/dims are honoured
+  // build CSV rows per-order: each order carries its own captured warehouse name + weight/dims
   const outRows: string[][] = [];
   for (const o of rows as any[]) {
     const m: ManualInput = {
-      warehouse, serviceType,
+      warehouse: o.warehouse_name || fallbackWarehouse, serviceType,
       weight: (o.weight_kg ?? "") !== "" && o.weight_kg != null ? String(o.weight_kg) : dWeight,
       length: (o.length_cm ?? "") !== "" && o.length_cm != null ? String(o.length_cm) : dLen,
       width: (o.width_cm ?? "") !== "" && o.width_cm != null ? String(o.width_cm) : dWid,
@@ -422,4 +488,32 @@ export async function handleApiOrdersProcess(env: Env, client: Client, req: Requ
       "Content-Disposition": `attachment; filename="shipxpeed_api_${stamp}.csv"`,
     },
   });
+}
+
+// ---------- Warehouses panel page ----------
+export async function warehousesPage(env: Env, client: Client): Promise<string> {
+  const rows = (await env.DB.prepare(
+    `SELECT w.*, (SELECT COUNT(*) FROM api_orders o WHERE o.warehouse_id = w.id) AS order_count
+       FROM warehouses w WHERE w.client_id = ? ORDER BY w.id DESC`
+  ).bind(client.id).all()).results ?? [];
+
+  const body = (rows as any[]).map((w) => `
+    <tr>
+      <td><b>${esc(w.name)}</b></td>
+      <td>${esc(w.contact_name || "")}<div class="mut">${esc(w.phone || "")}</div></td>
+      <td>${esc(w.address || "")}<div class="mut">${esc(w.city || "")}, ${esc(w.state || "")} ${esc(w.pincode || "")}</div></td>
+      <td>${w.shipxpeed_status === "created" ? `<span class="chip ok">created</span>` : `<span class="chip warn">pending</span>`}</td>
+      <td>${esc(w.order_count || 0)}</td>
+    </tr>`).join("");
+
+  const inner = `
+    <div><h1>Warehouses</h1><p class="sub">Pickup addresses captured from incoming orders. Each unique pickup becomes one warehouse — the name is what we push into the Shipxpeed sheet.</p></div>
+    <div class="card" style="padding:6px 6px;margin-top:14px">
+      <table>
+        <thead><tr><th>Name</th><th>Contact</th><th>Pickup address</th><th>Shipxpeed</th><th>Orders</th></tr></thead>
+        <tbody>${body || `<tr><td colspan="5" class="mut" style="padding:18px">No warehouses yet. They're created automatically from the pickup details on incoming orders.</td></tr>`}</tbody>
+      </table>
+    </div>
+    <p class="mut" style="margin-top:12px;font-size:13px"><b>pending</b> = not yet created in the Shipxpeed panel; <b>created</b> = exists in Shipxpeed and safe to use in the bulk sheet.</p>`;
+  return layout("Warehouses", inner, { clientName: client.name ?? client.email, active: "warehouses", wide: true });
 }
