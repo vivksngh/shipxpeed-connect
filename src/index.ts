@@ -35,6 +35,9 @@ import {
   handleWarehouseCreated,
   handleAutomationExport,
   handleWriteback,
+  handleClientsList,
+  settingsPage,
+  handleSaveSettings,
 } from "./automation";
 import {
   layout,
@@ -131,6 +134,7 @@ export default {
       if (apiGet && method === "GET") return handleApiGetOrder(req, env, decodeURIComponent(apiGet[1]));
 
       // ---- automation API (Bearer AUTOMATION_TOKEN, no cookie) ----
+      if (path === "/automation/clients" && method === "GET") return handleClientsList(req, env);
       if (path === "/automation/pending-warehouses" && method === "GET") return handlePendingWarehouses(req, env);
       if (path === "/automation/warehouse-created" && method === "POST") return handleWarehouseCreated(req, env);
       if (path === "/automation/export" && method === "GET") return handleAutomationExport(req, env);
@@ -154,6 +158,10 @@ export default {
       if (path === "/api-keys" && method === "POST") return handleCreateApiKey(env, client, req);
       const revoke = path.match(/^\/api-keys\/(\d+)\/revoke$/);
       if (revoke && method === "POST") return handleRevokeApiKey(env, client, revoke[1]);
+
+      // ---- Shipxpeed login settings (panel, cookie-auth) ----
+      if (path === "/settings" && method === "GET") return htmlResponse(await settingsPage(env, client));
+      if (path === "/settings" && method === "POST") return handleSaveSettings(env, client, req);
 
       if (path === "/connect" && method === "GET") return htmlResponse(connectPage(client.name ?? client.email, undefined, undefined, env.APP_URL));
       if (path === "/connect" && method === "POST") return handleConnect(req, env, client);
