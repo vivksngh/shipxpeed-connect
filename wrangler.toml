@@ -3,6 +3,11 @@ main = "src/index.ts"
 compatibility_date = "2024-11-01"
 compatibility_flags = ["nodejs_compat"]
 
+# --- Cron Triggers ---
+# Hourly Google Sheet status sync (scheduled() handler in src/index.ts).
+[triggers]
+crons = ["0 * * * *"]
+
 # --- D1 database binding ---
 # After you run `wrangler d1 create shipxpeed_connect`, paste the returned
 # database_id below (replace REPLACE_WITH_YOUR_D1_ID).
