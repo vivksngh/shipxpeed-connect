@@ -98,6 +98,52 @@ function parseCsv(text: string): string[][] {
   return rows.filter((r) => r.some((c) => c.trim() !== ""));
 }
 
+// ---------- hourly Google Sheet status sync (Cron Trigger) ----------
+// Reads the "Master" worksheet (col A = AWB, col D = status). For every row
+// whose status (col D) is NOT blank, update the matching order (by AWB) with
+// the new status. Blank status = keep whatever status the order already had.
+// The sheet must be link-viewable (Share -> Anyone with the link -> Viewer).
+const SHEET_ID = "1TJl03Sp3INjdHrWri1z0VfX9CbTvQGOadYaekmxQSkM";
+const SHEET_NAME = "Master";
+
+function mapShipmentStatus(raw: string): string | null {
+  const s = raw.toLowerCase();
+  if (!s) return null;
+  if (s.includes("deliver")) return "delivered";
+  if (s.includes("rto") || s.includes("return")) return "returned";
+  if (s.includes("cancel")) return "cancelled";
+  if (s.includes("transit") || s.includes("ship") || s.includes("out for") || s.includes("dispatch") || s.includes("picked")) return "shipped";
+  if (s.includes("pending") || s.includes("booked") || s.includes("manifest") || s.includes("placed")) return "placed";
+  return null;
+}
+
+async function syncSheetStatuses(env: Env): Promise<{ read: number; updated: number }> {
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(SHEET_NAME)}`;
+  const res = await fetch(url, { headers: { "User-Agent": "vivekreyansh-connect" } });
+  if (!res.ok) throw new Error(`sheet fetch failed: ${res.status}`);
+  const rows = parseCsv(await res.text());
+  if (rows.length === 0) return { read: 0, updated: 0 };
+  // drop a header row (col A not an AWB, e.g. "AWB")
+  let start = 0;
+  const first = (rows[0][0] ?? "").trim().toLowerCase();
+  if (first === "" || first.includes("awb") || first.includes("tracking")) start = 1;
+  let read = 0, updated = 0;
+  for (let r = start; r < rows.length; r++) {
+    const awb = (rows[r][0] ?? "").trim();        // Column A
+    const status = (rows[r][3] ?? "").trim();     // Column D
+    if (!awb) continue;
+    read++;
+    if (!status) continue;                        // blank -> keep last status
+    const coarse = mapShipmentStatus(status);
+    const stmt = coarse
+      ? env.DB.prepare(`UPDATE order_processing SET shipment_status = ?, status = ?, updated_at = datetime('now') WHERE awb = ?`).bind(status, coarse, awb)
+      : env.DB.prepare(`UPDATE order_processing SET shipment_status = ?, updated_at = datetime('now') WHERE awb = ?`).bind(status, awb);
+    const out = await stmt.run();
+    if ((out.meta?.changes ?? 0) > 0) updated++;
+  }
+  return { read, updated };
+}
+
 // ---------- main fetch handler ----------
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -201,6 +247,12 @@ export default {
         500
       );
     }
+  },
+
+  // Cron Trigger (see wrangler.toml [triggers]). Runs hourly: pull the Master
+  // sheet and push any non-blank shipment statuses onto the matching orders.
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(syncSheetStatuses(env).catch((e) => console.error("sheet sync failed:", e)));
   },
 };
 
